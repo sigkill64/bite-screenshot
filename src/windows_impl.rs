@@ -9,24 +9,16 @@ use global_hotkey::{
 };
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
 use screenshots::Screen;
-use windows::{
-    core::PWSTR,
-    Win32::{
-        Foundation::{CloseHandle, BOOL, HWND, POINT, RECT},
-        Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
-        },
-        System::{
-            ProcessStatus::K32GetModuleBaseNameW,
-            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
-        },
-        UI::{
-            Input::KeyboardAndMouse::GetCursorPos,
-            WindowsAndMessaging::{
-                GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId,
-            },
-        },
+use windows::Win32::{
+    Foundation::{CloseHandle, BOOL, HWND, POINT, RECT},
+    Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST},
+    System::{
+        ProcessStatus::K32GetModuleBaseNameW,
+        Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+    },
+    UI::WindowsAndMessaging::{
+        GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId,
     },
 };
 use winrt_notification::{Duration, Sound, Toast};
@@ -252,7 +244,7 @@ fn find_screen(left: i32, top: i32) -> Result<Screen> {
 
 fn active_window_context() -> Result<WindowContext> {
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0 == 0 {
+    if hwnd.0.is_null() {
         return Err(anyhow!("没有可用的前台窗口"));
     }
 
@@ -278,7 +270,7 @@ fn active_window_context() -> Result<WindowContext> {
 fn window_title(hwnd: HWND) -> Result<String> {
     let length = unsafe { GetWindowTextLengthW(hwnd) };
     let mut buffer = vec![0u16; length as usize + 1];
-    let read = unsafe { GetWindowTextW(hwnd, PWSTR(buffer.as_mut_ptr()), buffer.len() as i32) };
+    let read = unsafe { GetWindowTextW(hwnd, &mut buffer) };
     Ok(String::from_utf16_lossy(&buffer[..read as usize]))
 }
 
@@ -299,14 +291,7 @@ fn process_name(hwnd: HWND) -> Result<String> {
     .context("打开前台窗口进程失败")?;
 
     let mut buffer = vec![0u16; 260];
-    let read = unsafe {
-        K32GetModuleBaseNameW(
-            process,
-            None,
-            PWSTR(buffer.as_mut_ptr()),
-            buffer.len() as u32,
-        )
-    };
+    let read = unsafe { K32GetModuleBaseNameW(process, None, &mut buffer) };
     let value = String::from_utf16_lossy(&buffer[..read as usize]);
     unsafe {
         let _ = CloseHandle(process);
