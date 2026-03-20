@@ -7,10 +7,14 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use image::{ImageBuffer, ImageFormat, Rgba};
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 use crate::{config::Config, naming};
 
 const SCRGB_REFERENCE_WHITE_NITS: u32 = 80;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Copy)]
 pub enum CaptureKind {
@@ -95,44 +99,47 @@ fn save_hdr_avif(path: &Path, width: u32, height: u32, pixels: &[u16]) -> Result
         "zscale=pin=bt709:tin=linear:min=gbr:rin=full:p=bt2020:t=smpte2084:m=bt2020nc:r=full:npl={SCRGB_REFERENCE_WHITE_NITS},format=yuv444p10le"
     );
 
-    let mut child = Command::new("ffmpeg")
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "gbrpf32le",
-            "-s",
-            &size,
-            "-i",
-            "pipe:0",
-            "-vf",
-            &filter,
-            "-frames:v",
-            "1",
-            "-c:v",
-            "libaom-av1",
-            "-still-picture",
-            "1",
-            "-cpu-used",
-            "6",
-            "-crf",
-            "12",
-            "-pix_fmt",
-            "yuv444p10le",
-            "-color_primaries",
-            "bt2020",
-            "-color_trc",
-            "smpte2084",
-            "-colorspace",
-            "bt2020nc",
-            "-f",
-            "avif",
-            path.to_string_lossy().as_ref(),
-        ])
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gbrpf32le",
+        "-s",
+        &size,
+        "-i",
+        "pipe:0",
+        "-vf",
+        &filter,
+        "-frames:v",
+        "1",
+        "-c:v",
+        "libaom-av1",
+        "-still-picture",
+        "1",
+        "-cpu-used",
+        "6",
+        "-crf",
+        "12",
+        "-pix_fmt",
+        "yuv444p10le",
+        "-color_primaries",
+        "bt2020",
+        "-color_trc",
+        "smpte2084",
+        "-colorspace",
+        "bt2020nc",
+        "-f",
+        "avif",
+        path.to_string_lossy().as_ref(),
+    ]);
+    configure_background_command(&mut command);
+
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -191,6 +198,13 @@ fn rgba16f_sc_rgb_to_gbrpf32le(pixels: &[u16]) -> Result<Vec<u8>> {
 
 fn write_f32(buffer: &mut [u8], value: f32) {
     buffer.copy_from_slice(&value.to_le_bytes());
+}
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn half_to_f32(bits: u16) -> f32 {
