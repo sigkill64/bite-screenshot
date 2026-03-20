@@ -13,18 +13,14 @@ pub fn build_file_name(
     let app_segment = if matches!(kind, CaptureKind::CurrentWindow) {
         app_name
             .filter(|value| !value.is_empty())
-            .map(|value| {
-                config
-                    .app_name_pattern
-                    .replace("{app_name}", &sanitize(value))
-            })
+            .map(|value| replace_app_name_placeholders(&config.app_name_pattern, &sanitize(value)))
             .unwrap_or_default()
     } else {
         String::new()
     };
 
-    pattern = pattern.replace("{mode}", kind.label());
-    pattern = pattern.replace("{app}", &app_segment);
+    pattern = replace_mode_placeholders(&pattern, kind.label());
+    pattern = replace_app_placeholders(&pattern, &app_segment);
 
     let mut rendered = Local::now().format(&pattern).to_string();
     if let Some((stem, _)) = rendered.rsplit_once('.') {
@@ -44,4 +40,16 @@ fn sanitize(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+fn replace_mode_placeholders(pattern: &str, mode: &str) -> String {
+    pattern.replace("{Mode}", mode)
+}
+
+fn replace_app_placeholders(pattern: &str, app: &str) -> String {
+    pattern.replace("{App}", app)
+}
+
+fn replace_app_name_placeholders(pattern: &str, app_name: &str) -> String {
+    pattern.replace("{AppName}", app_name)
 }

@@ -3,6 +3,17 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use directories::BaseDirs;
 use serde::Deserialize;
+#[cfg(target_os = "windows")]
+use windows::core::GUID;
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::HANDLE,
+    System::Com::CoTaskMemFree,
+    UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
+        FOLDERID_Pictures, FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
+    },
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -17,10 +28,14 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub show_notification: bool,
     #[serde(default)]
-    pub auto_open: bool,
-    pub open_command: Option<String>,
-    #[serde(default = "default_region_side")]
-    pub region_side: u32,
+    auto_open: bool,
+    #[serde(default)]
+    pub auto_open_sdr: Option<bool>,
+    #[serde(default)]
+    pub auto_open_hdr: Option<bool>,
+    open_command: Option<String>,
+    pub open_command_sdr: Option<String>,
+    pub open_command_hdr: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,8 +74,9 @@ impl Config {
 
         let text = fs::read_to_string(&path)
             .with_context(|| format!("读取配置失败: {}", path.display()))?;
-        let config = toml::from_str::<Config>(&text)
+        let mut config = toml::from_str::<Config>(&text)
             .with_context(|| format!("解析配置失败: {}", path.display()))?;
+        config.expand_placeholders();
         Ok(config)
     }
 
@@ -77,52 +93,137 @@ impl Config {
             hotkeys: HotkeyConfig::default(),
             show_notification: true,
             auto_open: false,
+            auto_open_sdr: None,
+            auto_open_hdr: None,
             open_command: None,
-            region_side: default_region_side(),
+            open_command_sdr: None,
+            open_command_hdr: None,
         }
     }
 
     fn example_text(&self) -> String {
+        let output_dir = if self.output_dir == default_output_dir() {
+            DEFAULT_OUTPUT_DIR_PLACEHOLDER.to_string()
+        } else {
+            self.output_dir.display().to_string().replace('/', "\\")
+        };
         format!(
-            r#"output_dir = "{}"
+            r#"output_dir = '{}'
 filename_pattern = "{}"
 app_name_pattern = "{}"
 show_notification = {}
-auto_open = {}
-# open_command = "mspaint.exe"
-region_side = {}
+auto_open_sdr = {}
+auto_open_hdr = {}
+# open_command_sdr = "mspaint.exe"
+# open_command_hdr = "hdr-viewer.exe"
 
 [hotkeys]
 fullscreen = "{}"
 current_window = "{}"
 square_region = "{}"
 "#,
-            self.output_dir.display(),
+            output_dir,
             self.filename_pattern,
             self.app_name_pattern,
             self.show_notification,
-            self.auto_open,
-            self.region_side,
+            self.auto_open_for(false),
+            self.auto_open_for(true),
             self.hotkeys.fullscreen,
             self.hotkeys.current_window,
             self.hotkeys.square_region,
         )
     }
+
+    fn expand_placeholders(&mut self) {
+        self.output_dir = expand_path_placeholders(&self.output_dir);
+    }
+
+    pub fn auto_open_for(&self, hdr: bool) -> bool {
+        if hdr {
+            self.auto_open_hdr.unwrap_or(self.auto_open)
+        } else {
+            self.auto_open_sdr.unwrap_or(self.auto_open)
+        }
+    }
+
+    pub fn open_command_for(&self, hdr: bool) -> Option<&str> {
+        if hdr {
+            self.open_command_hdr
+                .as_deref()
+                .or(self.open_command.as_deref())
+        } else {
+            self.open_command_sdr
+                .as_deref()
+                .or(self.open_command.as_deref())
+        }
+    }
 }
 
+const DEFAULT_OUTPUT_DIR_PLACEHOLDER: &str = r"{Pictures}\Screenshots";
+
 fn default_output_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(path) = known_folder_path(&FOLDERID_Pictures) {
+        return path.join("Screenshots");
+    }
+
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Pictures/BiteScreenshots")
+        .join("Pictures")
+        .join("Screenshots")
+}
+
+fn expand_path_placeholders(path: &PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let mut value = path.display().to_string();
+        for (placeholder, folder_id) in known_folder_placeholders() {
+            if value.contains(placeholder) {
+                if let Some(folder) = known_folder_path(folder_id) {
+                    value = value.replace(placeholder, &folder.display().to_string());
+                }
+            }
+        }
+        return PathBuf::from(value);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.clone()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn known_folder_placeholders() -> [(&'static str, &'static GUID); 6] {
+    [
+        ("{Desktop}", &FOLDERID_Desktop),
+        ("{Documents}", &FOLDERID_Documents),
+        ("{Downloads}", &FOLDERID_Downloads),
+        ("{Music}", &FOLDERID_Music),
+        ("{Pictures}", &FOLDERID_Pictures),
+        ("{Videos}", &FOLDERID_Videos),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn known_folder_path(folder_id: &GUID) -> Option<PathBuf> {
+    let path =
+        unsafe { SHGetKnownFolderPath(folder_id, KF_FLAG_DEFAULT, HANDLE::default()) }.ok()?;
+
+    let value = unsafe { path.to_string() }.ok().map(PathBuf::from);
+    unsafe {
+        CoTaskMemFree(Some(path.0 as _));
+    }
+    value
 }
 
 fn default_filename_pattern() -> String {
-    "%Y-%m-%d_%H-%M-%S_{mode}{app}.png".to_string()
+    "%Y-%m-%d_%H-%M-%S_{Mode}{App}.png".to_string()
 }
 
 fn default_app_name_pattern() -> String {
-    "_{app_name}".to_string()
+    "_{AppName}".to_string()
 }
 
 fn default_fullscreen_hotkey() -> String {
@@ -139,8 +240,4 @@ fn default_region_hotkey() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_region_side() -> u32 {
-    512
 }
